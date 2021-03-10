@@ -1,13 +1,15 @@
 package user_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/ardanlabs/service/business/auth"
+	"github.com/ardanlabs/service/business/data/schema"
 	"github.com/ardanlabs/service/business/data/user"
 	"github.com/ardanlabs/service/business/tests"
-	"github.com/dgrijalva/jwt-go"
+	"github.com/dgrijalva/jwt-go/v4"
 	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
 )
@@ -23,7 +25,7 @@ func TestUser(t *testing.T) {
 		testID := 0
 		t.Logf("\tTest %d:\tWhen handling a single User.", testID)
 		{
-			ctx := tests.Context()
+			ctx := context.Background()
 			now := time.Date(2018, time.October, 1, 0, 0, 0, 0, time.UTC)
 			traceID := "00000000-0000-0000-0000-000000000000"
 
@@ -45,11 +47,10 @@ func TestUser(t *testing.T) {
 				StandardClaims: jwt.StandardClaims{
 					Issuer:    "service project",
 					Subject:   usr.ID,
-					Audience:  "students",
-					ExpiresAt: now.Add(time.Hour).Unix(),
-					IssuedAt:  now.Unix(),
+					ExpiresAt: jwt.At(now.Add(time.Hour)),
+					IssuedAt:  jwt.At(now),
 				},
-				Roles: []string{auth.RoleAdmin, auth.RoleUser},
+				Roles: []string{auth.RoleUser},
 			}
 
 			saved, err := u.QueryByID(ctx, traceID, claims, usr.ID)
@@ -66,6 +67,15 @@ func TestUser(t *testing.T) {
 			upd := user.UpdateUser{
 				Name:  tests.StringPointer("Jacob Walker"),
 				Email: tests.StringPointer("jacob@ardanlabs.com"),
+			}
+
+			claims = auth.Claims{
+				StandardClaims: jwt.StandardClaims{
+					Issuer:    "service project",
+					ExpiresAt: jwt.At(now.Add(time.Hour)),
+					IssuedAt:  jwt.At(now),
+				},
+				Roles: []string{auth.RoleAdmin},
 			}
 
 			if err := u.Update(ctx, traceID, claims, usr.ID, upd, now); err != nil {
@@ -95,7 +105,7 @@ func TestUser(t *testing.T) {
 				t.Logf("\t%s\tTest %d:\tShould be able to see updates to Email.", tests.Success, testID)
 			}
 
-			if err := u.Delete(ctx, traceID, usr.ID); err != nil {
+			if err := u.Delete(ctx, traceID, claims, usr.ID); err != nil {
 				t.Fatalf("\t%s\tTest %d:\tShould be able to delete user : %s.", tests.Failed, testID, err)
 			}
 			t.Logf("\t%s\tTest %d:\tShould be able to delete user.", tests.Success, testID)
@@ -105,6 +115,54 @@ func TestUser(t *testing.T) {
 				t.Fatalf("\t%s\tTest %d:\tShould NOT be able to retrieve user : %s.", tests.Failed, testID, err)
 			}
 			t.Logf("\t%s\tTest %d:\tShould NOT be able to retrieve user.", tests.Success, testID)
+		}
+	}
+}
+
+func TestUserPaging(t *testing.T) {
+	log, db, teardown := tests.NewUnit(t)
+	t.Cleanup(teardown)
+
+	schema.Seed(db)
+
+	u := user.New(log, db)
+
+	t.Log("Given the need to page through User records.")
+	{
+		testID := 0
+		t.Logf("\tTest %d:\tWhen paging through 2 users.", testID)
+		{
+			ctx := context.Background()
+			traceID := "00000000-0000-0000-0000-000000000000"
+
+			users1, err := u.Query(ctx, traceID, 1, 1)
+			if err != nil {
+				t.Fatalf("\t%s\tTest %d:\tShould be able to retrieve users for page 1 : %s.", tests.Failed, testID, err)
+			}
+			t.Logf("\t%s\tTest %d:\tShould be able to retrieve users for page 1.", tests.Success, testID)
+
+			if len(users1) != 1 {
+				t.Fatalf("\t%s\tTest %d:\tShould have a single user : %s.", tests.Failed, testID, err)
+			}
+			t.Logf("\t%s\tTest %d:\tShould have a single user.", tests.Success, testID)
+
+			users2, err := u.Query(ctx, traceID, 2, 1)
+			if err != nil {
+				t.Fatalf("\t%s\tTest %d:\tShould be able to retrieve users for page 2 : %s.", tests.Failed, testID, err)
+			}
+			t.Logf("\t%s\tTest %d:\tShould be able to retrieve users for page 2.", tests.Success, testID)
+
+			if len(users2) != 1 {
+				t.Fatalf("\t%s\tTest %d:\tShould have a single user : %s.", tests.Failed, testID, err)
+			}
+			t.Logf("\t%s\tTest %d:\tShould have a single user.", tests.Success, testID)
+
+			if users1[0].ID == users2[0].ID {
+				t.Logf("\t\tTest %d:\tUser1: %v", testID, users1[0].ID)
+				t.Logf("\t\tTest %d:\tUser2: %v", testID, users2[0].ID)
+				t.Fatalf("\t%s\tTest %d:\tShould have different users : %s.", tests.Failed, testID, err)
+			}
+			t.Logf("\t%s\tTest %d:\tShould have different users.", tests.Success, testID)
 		}
 	}
 }
@@ -120,7 +178,7 @@ func TestAuthenticate(t *testing.T) {
 		testID := 0
 		t.Logf("\tTest %d:\tWhen handling a single User.", testID)
 		{
-			ctx := tests.Context()
+			ctx := context.Background()
 			now := time.Date(2018, time.October, 1, 0, 0, 0, 0, time.UTC)
 			traceID := "00000000-0000-0000-0000-000000000000"
 
@@ -149,9 +207,8 @@ func TestAuthenticate(t *testing.T) {
 				StandardClaims: jwt.StandardClaims{
 					Issuer:    "service project",
 					Subject:   usr.ID,
-					Audience:  "students",
-					ExpiresAt: now.Add(time.Hour).Unix(),
-					IssuedAt:  now.Unix(),
+					ExpiresAt: jwt.At(now.Add(time.Hour)),
+					IssuedAt:  jwt.At(now),
 				},
 			}
 

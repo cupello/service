@@ -105,12 +105,14 @@ func run(log *log.Logger) error {
 		}
 
 	case "users":
-		if err := commands.Users(traceID, log, dbConfig); err != nil {
+		pageNumber := cfg.Args.Num(1)
+		rowsPerPage := cfg.Args.Num(2)
+		if err := commands.Users(traceID, log, dbConfig, pageNumber, rowsPerPage); err != nil {
 			return errors.Wrap(err, "getting users")
 		}
 
-	case "keygen":
-		if err := commands.KeyGen(); err != nil {
+	case "genkey":
+		if err := commands.GenKey(); err != nil {
 			return errors.Wrap(err, "key generation")
 		}
 
@@ -127,7 +129,7 @@ func run(log *log.Logger) error {
 		fmt.Println("seed: add data to the database")
 		fmt.Println("useradd: add a new user to the database")
 		fmt.Println("users: get a list of users from the database")
-		fmt.Println("keygen: generate a set of private/public key files")
+		fmt.Println("genkey: generate a set of private/public key files")
 		fmt.Println("gentoken: generate a JWT for a user with claims")
 		fmt.Println("provide a command to get more help.")
 		return commands.ErrHelp

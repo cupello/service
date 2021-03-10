@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package zipkin
+package zipkin // import "go.opentelemetry.io/otel/exporters/trace/zipkin"
 
 import (
 	"encoding/binary"
@@ -21,12 +21,17 @@ import (
 
 	zkmodel "github.com/openzipkin/zipkin-go/model"
 
-	"go.opentelemetry.io/otel/api/trace"
 	"go.opentelemetry.io/otel/label"
 	export "go.opentelemetry.io/otel/sdk/export/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
-func toZipkinSpanModels(batch []*export.SpanData, serviceName string) []zkmodel.SpanModel {
+const (
+	keyInstrumentationLibraryName    = "otel.instrumentation_library.name"
+	keyInstrumentationLibraryVersion = "otel.instrumentation_library.version"
+)
+
+func toZipkinSpanModels(batch []*export.SpanSnapshot, serviceName string) []zkmodel.SpanModel {
 	models := make([]zkmodel.SpanModel, 0, len(batch))
 	for _, data := range batch {
 		models = append(models, toZipkinSpanModel(data, serviceName))
@@ -34,7 +39,7 @@ func toZipkinSpanModels(batch []*export.SpanData, serviceName string) []zkmodel.
 	return models
 }
 
-func toZipkinSpanModel(data *export.SpanData, serviceName string) zkmodel.SpanModel {
+func toZipkinSpanModel(data *export.SpanSnapshot, serviceName string) zkmodel.SpanModel {
 	return zkmodel.SpanModel{
 		SpanContext: toZipkinSpanContext(data),
 		Name:        data.Name,
@@ -51,7 +56,7 @@ func toZipkinSpanModel(data *export.SpanData, serviceName string) zkmodel.SpanMo
 	}
 }
 
-func toZipkinSpanContext(data *export.SpanData) zkmodel.SpanContext {
+func toZipkinSpanContext(data *export.SpanSnapshot) zkmodel.SpanContext {
 	return zkmodel.SpanContext{
 		TraceID:  toZipkinTraceID(data.SpanContext.TraceID),
 		ID:       toZipkinID(data.SpanContext.SpanID),
@@ -62,7 +67,7 @@ func toZipkinSpanContext(data *export.SpanData) zkmodel.SpanContext {
 	}
 }
 
-func toZipkinTraceID(traceID trace.ID) zkmodel.TraceID {
+func toZipkinTraceID(traceID trace.TraceID) zkmodel.TraceID {
 	return zkmodel.TraceID{
 		High: binary.BigEndian.Uint64(traceID[:8]),
 		Low:  binary.BigEndian.Uint64(traceID[8:]),
@@ -101,7 +106,7 @@ func toZipkinKind(kind trace.SpanKind) zkmodel.Kind {
 	return zkmodel.Undetermined
 }
 
-func toZipkinAnnotations(events []export.Event) []zkmodel.Annotation {
+func toZipkinAnnotations(events []trace.Event) []zkmodel.Annotation {
 	if len(events) == 0 {
 		return nil
 	}
@@ -132,16 +137,30 @@ func attributesToJSONMapString(attributes []label.KeyValue) string {
 	return (string)(jsonBytes)
 }
 
-func toZipkinTags(data *export.SpanData) map[string]string {
-	// +2 for status code and for status message
-	m := make(map[string]string, len(data.Attributes)+2)
+// extraZipkinTags are those that may be added to every outgoing span
+var extraZipkinTags = []string{
+	"otel.status_code",
+	"otel.status_description",
+	keyInstrumentationLibraryName,
+	keyInstrumentationLibraryVersion,
+}
+
+func toZipkinTags(data *export.SpanSnapshot) map[string]string {
+	m := make(map[string]string, len(data.Attributes)+len(extraZipkinTags))
 	for _, kv := range data.Attributes {
 		m[(string)(kv.Key)] = kv.Value.Emit()
 	}
 	if v, ok := m["error"]; ok && v == "false" {
 		delete(m, "error")
 	}
-	m["ot.status_code"] = data.StatusCode.String()
-	m["ot.status_description"] = data.StatusMessage
+	m["otel.status_code"] = data.StatusCode.String()
+	m["otel.status_description"] = data.StatusMessage
+
+	if il := data.InstrumentationLibrary; il.Name != "" {
+		m[keyInstrumentationLibraryName] = il.Name
+		if il.Version != "" {
+			m[keyInstrumentationLibraryVersion] = il.Version
+		}
+	}
 	return m
 }

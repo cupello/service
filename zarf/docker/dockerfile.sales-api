@@ -1,5 +1,5 @@
 # Build the Go Binary.
-FROM golang:1.15.2 as build_sales-api
+FROM golang:1.16 as build_sales-api
 ENV CGO_ENABLED 0
 ARG VCS_REF
 
@@ -29,16 +29,14 @@ RUN go build -ldflags "-X main.build=${VCS_REF}"
 
 
 # Run the Go Binary in Alpine.
-FROM alpine:3.12
+FROM alpine:3.13
 ARG BUILD_DATE
 ARG VCS_REF
-ARG PACKAGE_NAME
-ARG PACKAGE_PREFIX
-COPY --from=build_sales-api /service/private.pem /app/private.pem
-COPY --from=build_sales-api /service/app/sales-admin/sales-admin /app/admin
-COPY --from=build_sales-api /service/app/sales-api/sales-api /app/sales-api
-WORKDIR /app
-CMD ["/app/sales-api"]
+COPY --from=build_sales-api /service/zarf/keys/. /service/zarf/keys/.
+COPY --from=build_sales-api /service/app/sales-admin/sales-admin /service/admin
+COPY --from=build_sales-api /service/app/sales-api/sales-api /service/sales-api
+WORKDIR /service
+CMD ["./sales-api"]
 
 LABEL org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.title="sales-api" \

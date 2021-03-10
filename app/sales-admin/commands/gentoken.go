@@ -11,7 +11,8 @@ import (
 	"github.com/ardanlabs/service/business/auth"
 	"github.com/ardanlabs/service/business/data/user"
 	"github.com/ardanlabs/service/foundation/database"
-	"github.com/dgrijalva/jwt-go"
+	"github.com/ardanlabs/service/foundation/keystore"
+	"github.com/dgrijalva/jwt-go/v4"
 	"github.com/pkg/errors"
 )
 
@@ -57,26 +58,10 @@ func GenToken(traceID string, log *log.Logger, cfg database.Config, id string, p
 		return errors.Wrap(err, "parsing PEM into private key")
 	}
 
-	// In a production system, a key id (KID) is used to retrieve the correct
-	// public key to parse a JWT for auth and claims. A key lookup function is
-	// provided to perform the task of retrieving a KID for a given public key.
-	// In this code, I am writing a lookup function that will return the public
-	// key for the private key provided with an arbitary KID.
-	keyID := "54bb2165-71e1-41a6-af3e-7da4a0e1e2c1"
-	keyLookupFunc := func(publicKID string) (*rsa.PublicKey, error) {
-		switch publicKID {
-		case keyID:
-			return &privateKey.PublicKey, nil
-		}
-		return nil, fmt.Errorf("no public key found for the specified kid: %s", publicKID)
-	}
-
 	// An authenticator maintains the state required to handle JWT processing.
-	// It requires the private key for generating tokens. The KID for access
-	// to the corresponding public key, the algorithms to use (RS256), and the
-	// key lookup function to perform the actual retrieve of the KID to public
-	// key lookup.
-	a, err := auth.New(privateKey, keyID, algorithm, keyLookupFunc)
+	// It requires a keystore to lookup private and public keys based on a
+	// key id. There is a keystore implementation in the project.
+	a, err := auth.New(algorithm, keystore.NewMap(map[string]*rsa.PrivateKey{id: privateKey}))
 	if err != nil {
 		return errors.Wrap(err, "constructing auth")
 	}
@@ -96,8 +81,8 @@ func GenToken(traceID string, log *log.Logger, cfg database.Config, id string, p
 		StandardClaims: jwt.StandardClaims{
 			Issuer:    "service project",
 			Subject:   usr.ID,
-			ExpiresAt: time.Now().Add(8760 * time.Hour).Unix(),
-			IssuedAt:  time.Now().Unix(),
+			ExpiresAt: jwt.At(time.Now().Add(8760 * time.Hour)),
+			IssuedAt:  jwt.Now(),
 		},
 		Roles: usr.Roles,
 	}
@@ -106,7 +91,7 @@ func GenToken(traceID string, log *log.Logger, cfg database.Config, id string, p
 	// with need to be configured with the information found in the public key
 	// file to validate these claims. Dgraph does not support key rotate at
 	// this time.
-	token, err := a.GenerateToken(claims)
+	token, err := a.GenerateToken(id, claims)
 	if err != nil {
 		return errors.Wrap(err, "generating token")
 	}

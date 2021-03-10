@@ -5,13 +5,23 @@ export PROJECT = ardan-starter-kit
 # ==============================================================================
 # Testing running system
 
-# curl --user "admin@example.com:gophers" http://localhost:3000/v1/users/token
+# For testing a simple query on the system. Don't forget to `make seed` first.
+# curl --user "admin@example.com:gophers" http://localhost:3000/v1/users/token/54bb2165-71e1-41a6-af3e-7da4a0e1e2c1
 # export TOKEN="COPY TOKEN STRING FROM LAST CALL"
-# curl -H "Authorization: Bearer ${TOKEN}" http://localhost:3000/v1/users
+# curl -H "Authorization: Bearer ${TOKEN}" http://localhost:3000/v1/users/1/2
 
-# hey -m GET -c 100 -n 10000 -H "Authorization: Bearer ${TOKEN}" http://localhost:3000/v1/users
+# For testing load on the service.
+# hey -m GET -c 100 -n 10000 -H "Authorization: Bearer ${TOKEN}" http://localhost:3000/v1/users/1/2
 # zipkin: http://localhost:9411
 # expvarmon -ports=":4000" -vars="build,requests,goroutines,errors,mem:memstats.Alloc"
+
+# Used to install expvarmon program for metrics dashboard.
+# go install github.com/divan/expvarmon@latest
+
+# // To generate a private/public key PEM file.
+# openssl genpkey -algorithm RSA -out private.pem -pkeyopt rsa_keygen_bits:2048
+# openssl rsa -pubout -in private.pem -out public.pem
+# ./sales-admin genkey
 
 # ==============================================================================
 # Building containers
@@ -52,7 +62,7 @@ logs:
 # Running from within k8s/dev
 
 kind-up:
-	kind create cluster --image kindest/node:v1.18.8 --name ardan-starter-cluster --config zarf/k8s/dev/kind-config.yaml
+	kind create cluster --image kindest/node:v1.20.2 --name ardan-starter-cluster --config zarf/k8s/dev/kind-config.yaml
 
 kind-down:
 	kind delete cluster --name ardan-starter-cluster
@@ -64,7 +74,7 @@ kind-load:
 kind-services:
 	kustomize build zarf/k8s/dev | kubectl apply -f -
 
-kind-sales: sales
+kind-update: sales
 	kind load docker-image sales-api-amd64:1.0 --name ardan-starter-cluster
 	kubectl delete pods -lapp=sales-api
 
@@ -128,6 +138,9 @@ deps-upgrade:
 
 deps-cleancache:
 	go clean -modcache
+
+list:
+	go list -mod=mod all
 
 # ==============================================================================
 # Docker support

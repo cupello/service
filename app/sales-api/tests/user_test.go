@@ -13,10 +13,20 @@ import (
 	"github.com/ardanlabs/service/business/auth"
 	"github.com/ardanlabs/service/business/data/user"
 	"github.com/ardanlabs/service/business/tests"
-	"github.com/ardanlabs/service/foundation/web"
+	"github.com/ardanlabs/service/business/validate"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 )
+
+// UserTests holds methods for each user subtest. This type allows passing
+// dependencies for tests while still providing a convenient syntax when
+// subtests are registered.
+type UserTests struct {
+	app        http.Handler
+	kid        string
+	userToken  string
+	adminToken string
+}
 
 // TestUsers is the entry point for testing user management functions.
 func TestUsers(t *testing.T) {
@@ -25,7 +35,8 @@ func TestUsers(t *testing.T) {
 
 	shutdown := make(chan os.Signal, 1)
 	tests := UserTests{
-		app:        handlers.API("develop", shutdown, test.Log, test.DB, test.Auth),
+		app:        handlers.API("develop", shutdown, test.Log, test.Auth, test.DB),
+		kid:        test.KID,
 		userToken:  test.Token("user@example.com", "gophers"),
 		adminToken: test.Token("admin@example.com", "gophers"),
 	}
@@ -41,15 +52,6 @@ func TestUsers(t *testing.T) {
 	t.Run("deleteUserNotFound", tests.deleteUserNotFound)
 	t.Run("putUser404", tests.putUser404)
 	t.Run("crudUsers", tests.crudUser)
-}
-
-// UserTests holds methods for each user subtest. This type allows passing
-// dependencies for tests while still providing a convenient syntax when
-// subtests are registered.
-type UserTests struct {
-	app        http.Handler
-	userToken  string
-	adminToken string
 }
 
 // getToken401 ensures an unknown user can't generate a token.
@@ -74,7 +76,7 @@ func (ut *UserTests) getToken401(t *testing.T) {
 }
 
 func (ut *UserTests) getToken200(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/v1/users/token", nil)
+	r := httptest.NewRequest(http.MethodGet, "/v1/users/token/"+ut.kid, nil)
 	w := httptest.NewRecorder()
 
 	r.SetBasicAuth("admin@example.com", "gophers")
@@ -127,25 +129,26 @@ func (ut *UserTests) postUser400(t *testing.T) {
 			}
 			t.Logf("\t%s\tTest %d:\tShould receive a status code of 400 for the response.", tests.Success, testID)
 
-			var got web.ErrorResponse
+			var got validate.ErrorResponse
 			if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
 				t.Fatalf("\t%s\tTest %d:\tShould be able to unmarshal the response to an error type : %v", tests.Failed, testID, err)
 			}
 			t.Logf("\t%s\tTest %d:\tShould be able to unmarshal the response to an error type.", tests.Success, testID)
 
-			exp := web.ErrorResponse{
-				Error: "field validation error",
-				Fields: []web.FieldError{
-					{Field: "name", Error: "name is a required field"},
-					{Field: "email", Error: "email is a required field"},
-					{Field: "roles", Error: "roles is a required field"},
-					{Field: "password", Error: "password is a required field"},
-				},
+			fields := validate.FieldErrors{
+				{Field: "name", Error: "name is a required field"},
+				{Field: "email", Error: "email is a required field"},
+				{Field: "roles", Error: "roles is a required field"},
+				{Field: "password", Error: "password is a required field"},
+			}
+			exp := validate.ErrorResponse{
+				Error:  "data validation error",
+				Fields: fields.Error(),
 			}
 
 			// We can't rely on the order of the field errors so they have to be
 			// sorted. Tell the cmp package how to sort them.
-			sorter := cmpopts.SortSlices(func(a, b web.FieldError) bool {
+			sorter := cmpopts.SortSlices(func(a, b validate.FieldError) bool {
 				return a.Field < b.Field
 			})
 
@@ -449,7 +452,7 @@ func (ut *UserTests) postUser201(t *testing.T) user.Info {
 	return got
 }
 
-// deleteUser200 validates deleting a user that does exist.
+// deleteUser204 validates deleting a user that does exist.
 func (ut *UserTests) deleteUser204(t *testing.T, id string) {
 	r := httptest.NewRequest(http.MethodDelete, "/v1/users/"+id, nil)
 	w := httptest.NewRecorder()

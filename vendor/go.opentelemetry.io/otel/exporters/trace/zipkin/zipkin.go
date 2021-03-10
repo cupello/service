@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package zipkin
+package zipkin // import "go.opentelemetry.io/otel/exporters/trace/zipkin"
 
 import (
 	"bytes"
@@ -20,17 +20,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
+	"sync"
 
-	"go.opentelemetry.io/otel/api/global"
+	"go.opentelemetry.io/otel"
 	export "go.opentelemetry.io/otel/sdk/export/trace"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// Exporter exports SpanData to the zipkin collector. It implements
+// Exporter exports SpanSnapshots to the zipkin collector. It implements
 // the SpanBatcher interface, so it needs to be used together with the
 // WithBatcher option when setting up the exporter pipeline.
 type Exporter struct {
@@ -39,10 +41,13 @@ type Exporter struct {
 	client      *http.Client
 	logger      *log.Logger
 	o           options
+
+	stoppedMu sync.RWMutex
+	stopped   bool
 }
 
 var (
-	_ export.SpanBatcher = &Exporter{}
+	_ export.SpanExporter = &Exporter{}
 )
 
 // Options contains configuration for the exporter.
@@ -107,19 +112,15 @@ func NewRawExporter(collectorURL, serviceName string, opts ...Option) (*Exporter
 
 // NewExportPipeline sets up a complete export pipeline
 // with the recommended setup for trace provider
-func NewExportPipeline(collectorURL, serviceName string, opts ...Option) (*sdktrace.Provider, error) {
-	exp, err := NewRawExporter(collectorURL, serviceName, opts...)
+func NewExportPipeline(collectorURL, serviceName string, opts ...Option) (*sdktrace.TracerProvider, error) {
+	exporter, err := NewRawExporter(collectorURL, serviceName, opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	batcher := sdktrace.WithBatcher(exp)
-	tp, err := sdktrace.NewProvider(batcher)
-	if err != nil {
-		return nil, err
-	}
-	if exp.o.config != nil {
-		tp.ApplyConfig(*exp.o.config)
+	tp := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter))
+	if exporter.o.config != nil {
+		tp.ApplyConfig(*exporter.o.config)
 	}
 
 	return tp, err
@@ -133,50 +134,78 @@ func InstallNewPipeline(collectorURL, serviceName string, opts ...Option) error 
 		return err
 	}
 
-	global.SetTraceProvider(tp)
+	otel.SetTracerProvider(tp)
 	return nil
 }
 
-// ExportSpans is a part of an implementation of the SpanBatcher
-// interface.
-func (e *Exporter) ExportSpans(ctx context.Context, batch []*export.SpanData) {
-	if len(batch) == 0 {
-		e.logf("no spans to export")
-		return
+// ExportSpans exports SpanSnapshots to a Zipkin receiver.
+func (e *Exporter) ExportSpans(ctx context.Context, ss []*export.SpanSnapshot) error {
+	e.stoppedMu.RLock()
+	stopped := e.stopped
+	e.stoppedMu.RUnlock()
+	if stopped {
+		e.logf("exporter stopped, not exporting span batch")
+		return nil
 	}
-	models := toZipkinSpanModels(batch, e.serviceName)
+
+	if len(ss) == 0 {
+		e.logf("no spans to export")
+		return nil
+	}
+	models := toZipkinSpanModels(ss, e.serviceName)
 	body, err := json.Marshal(models)
 	if err != nil {
-		e.logf("failed to serialize zipkin models to JSON: %v", err)
-		return
+		return e.errf("failed to serialize zipkin models to JSON: %v", err)
 	}
 	e.logf("about to send a POST request to %s with body %s", e.url, body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.url, bytes.NewBuffer(body))
 	if err != nil {
-		e.logf("failed to create request to %s: %v", e.url, err)
-		return
+		return e.errf("failed to create request to %s: %v", e.url, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := e.client.Do(req)
 	if err != nil {
-		e.logf("request to %s failed: %v", e.url, err)
-		return
+		return e.errf("request to %s failed: %v", e.url, err)
 	}
-	e.logf("zipkin responded with status %d", resp.StatusCode)
+	defer resp.Body.Close()
 
-	_, err = ioutil.ReadAll(resp.Body)
+	// Zipkin API returns a 202 on success and the content of the body isn't interesting
+	// but it is still being read because according to https://golang.org/pkg/net/http/#Response
+	// > The default HTTP client's Transport may not reuse HTTP/1.x "keep-alive" TCP connections
+	// > if the Body is not read to completion and closed.
+	_, err = io.Copy(ioutil.Discard, resp.Body)
 	if err != nil {
-		e.logf("failed to read response body: %v", err)
+		return e.errf("failed to read response body: %v", err)
 	}
 
-	err = resp.Body.Close()
-	if err != nil {
-		e.logf("failed to close response body: %v", err)
+	if resp.StatusCode != http.StatusAccepted {
+		return e.errf("failed to send spans to zipkin server with status %d", resp.StatusCode)
 	}
+
+	return nil
+}
+
+// Shutdown stops the exporter flushing any pending exports.
+func (e *Exporter) Shutdown(ctx context.Context) error {
+	e.stoppedMu.Lock()
+	e.stopped = true
+	e.stoppedMu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	return nil
 }
 
 func (e *Exporter) logf(format string, args ...interface{}) {
 	if e.logger != nil {
 		e.logger.Printf(format, args...)
 	}
+}
+
+func (e *Exporter) errf(format string, args ...interface{}) error {
+	e.logf(format, args...)
+	return fmt.Errorf(format, args...)
 }

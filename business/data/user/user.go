@@ -3,17 +3,16 @@ package user
 
 import (
 	"context"
-	"database/sql"
 	"log"
 	"time"
 
 	"github.com/ardanlabs/service/business/auth"
+	"github.com/ardanlabs/service/business/validate"
 	"github.com/ardanlabs/service/foundation/database"
-	"github.com/dgrijalva/jwt-go"
-	"github.com/google/uuid"
+	"github.com/dgrijalva/jwt-go/v4"
 	"github.com/jmoiron/sqlx"
 	"github.com/pkg/errors"
-	"go.opentelemetry.io/otel/api/trace"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -48,8 +47,12 @@ func New(log *log.Logger, db *sqlx.DB) User {
 
 // Create inserts a new user into the database.
 func (u User) Create(ctx context.Context, traceID string, nu NewUser, now time.Time) (Info, error) {
-	ctx, span := trace.SpanFromContext(ctx).Tracer().Start(ctx, "internal.data.user.create")
+	ctx, span := trace.SpanFromContext(ctx).Tracer().Start(ctx, "business.data.user.create")
 	defer span.End()
+
+	if err := validate.Check(nu); err != nil {
+		return Info{}, errors.Wrap(err, "validating data")
+	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(nu.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -57,7 +60,7 @@ func (u User) Create(ctx context.Context, traceID string, nu NewUser, now time.T
 	}
 
 	usr := Info{
-		ID:           uuid.New().String(),
+		ID:           validate.GenerateID(),
 		Name:         nu.Name,
 		Email:        nu.Email,
 		PasswordHash: hash,
@@ -66,15 +69,17 @@ func (u User) Create(ctx context.Context, traceID string, nu NewUser, now time.T
 		DateUpdated:  now.UTC(),
 	}
 
-	const q = `INSERT INTO users
+	const q = `
+	INSERT INTO users
 		(user_id, name, email, password_hash, roles, date_created, date_updated)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`
+	VALUES
+		(:user_id, :name, :email, :password_hash, :roles, :date_created, :date_updated)`
 
-	u.log.Printf("%s : %s : query : %s", traceID, "user.Create",
-		database.Log(q, usr.ID, usr.Name, usr.Email, usr.PasswordHash, usr.Roles, usr.DateCreated, usr.DateUpdated),
+	u.log.Printf("%s: %s: %s", traceID, "user.Create",
+		database.Log(q, usr),
 	)
 
-	if _, err = u.db.ExecContext(ctx, q, usr.ID, usr.Name, usr.Email, usr.PasswordHash, usr.Roles, usr.DateCreated, usr.DateUpdated); err != nil {
+	if _, err := u.db.NamedExecContext(ctx, q, usr); err != nil {
 		return Info{}, errors.Wrap(err, "inserting user")
 	}
 
@@ -86,9 +91,16 @@ func (u User) Update(ctx context.Context, traceID string, claims auth.Claims, us
 	ctx, span := trace.SpanFromContext(ctx).Tracer().Start(ctx, "business.data.user.update")
 	defer span.End()
 
+	if err := validate.CheckID(userID); err != nil {
+		return ErrInvalidID
+	}
+	if err := validate.Check(uu); err != nil {
+		return errors.Wrap(err, "validating data")
+	}
+
 	usr, err := u.QueryByID(ctx, traceID, claims, userID)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "updating user")
 	}
 
 	if uu.Name != nil {
@@ -109,60 +121,97 @@ func (u User) Update(ctx context.Context, traceID string, claims auth.Claims, us
 	}
 	usr.DateUpdated = now
 
-	const q = `UPDATE users SET
-		"name" = $2,
-		"email" = $3,
-		"roles" = $4,
-		"password_hash" = $5,
-		"date_updated" = $6
-		WHERE user_id = $1`
+	const q = `
+	UPDATE
+		users
+	SET 
+		"name" = :name,
+		"email" = :email,
+		"roles" = :roles,
+		"password_hash" = :password_hash,
+		"date_updated" = :date_updated
+	WHERE
+		user_id = :user_id`
 
-	u.log.Printf("%s : %s : query : %s", traceID, "user.Update",
-		database.Log(q, usr.ID, usr.Name, usr.Email, usr.PasswordHash, usr.Roles, usr.DateCreated, usr.DateUpdated),
+	u.log.Printf("%s: %s: %s", traceID, "user.Update",
+		database.Log(q, usr),
 	)
 
-	if _, err = u.db.ExecContext(ctx, q, userID, usr.Name, usr.Email, usr.Roles, usr.PasswordHash, usr.DateUpdated); err != nil {
-		return errors.Wrap(err, "updating user")
+	if _, err := u.db.NamedExecContext(ctx, q, usr); err != nil {
+		return errors.Wrapf(err, "updating user %s", usr.ID)
 	}
 
 	return nil
 }
 
 // Delete removes a user from the database.
-func (u User) Delete(ctx context.Context, traceID string, userID string) error {
+func (u User) Delete(ctx context.Context, traceID string, claims auth.Claims, userID string) error {
 	ctx, span := trace.SpanFromContext(ctx).Tracer().Start(ctx, "business.data.user.delete")
 	defer span.End()
 
-	if _, err := uuid.Parse(userID); err != nil {
+	if err := validate.CheckID(userID); err != nil {
 		return ErrInvalidID
 	}
 
-	const q = `DELETE FROM users WHERE user_id = $1`
+	// If you are not an admin and looking to delete someone other than yourself.
+	if !claims.Authorized(auth.RoleAdmin) && claims.Subject != userID {
+		return ErrForbidden
+	}
 
-	u.log.Printf("%s : %s : query : %s", traceID, "user.Delete",
-		database.Log(q, userID),
+	data := struct {
+		UserID string `db:"user_id"`
+	}{
+		UserID: userID,
+	}
+
+	const q = `
+	DELETE FROM
+		users
+	WHERE
+		user_id = :user_id`
+
+	u.log.Printf("%s: %s: %s", traceID, "user.Delete",
+		database.Log(q, data),
 	)
 
-	if _, err := u.db.ExecContext(ctx, q, userID); err != nil {
-		return errors.Wrapf(err, "deleting user %s", userID)
+	if _, err := u.db.NamedExecContext(ctx, q, data); err != nil {
+		return errors.Wrapf(err, "deleting user %s", data.UserID)
 	}
 
 	return nil
 }
 
 // Query retrieves a list of existing users from the database.
-func (u User) Query(ctx context.Context, traceID string) ([]Info, error) {
+func (u User) Query(ctx context.Context, traceID string, pageNumber int, rowsPerPage int) ([]Info, error) {
 	ctx, span := trace.SpanFromContext(ctx).Tracer().Start(ctx, "business.data.user.query")
 	defer span.End()
 
-	const q = `SELECT * FROM users`
+	data := struct {
+		Offset      int `db:"offset"`
+		RowsPerPage int `db:"rows_per_page"`
+	}{
+		Offset:      (pageNumber - 1) * rowsPerPage,
+		RowsPerPage: rowsPerPage,
+	}
 
-	log.Printf("%s : %s : query : %s", traceID, "user.Query",
-		database.Log(q),
+	const q = `
+	SELECT
+		*
+	FROM
+		users
+	ORDER BY
+		user_id
+	OFFSET :offset ROWS FETCH NEXT :rows_per_page ROWS ONLY`
+
+	u.log.Printf("%s: %s: %s", traceID, "user.Query",
+		database.Log(q, data),
 	)
 
-	users := []Info{}
-	if err := u.db.SelectContext(ctx, &users, q); err != nil {
+	var users []Info
+	if err := database.NamedQuerySlice(ctx, u.db, q, data, &users); err != nil {
+		if err == database.ErrNotFound {
+			return nil, ErrNotFound
+		}
 		return nil, errors.Wrap(err, "selecting users")
 	}
 
@@ -174,27 +223,39 @@ func (u User) QueryByID(ctx context.Context, traceID string, claims auth.Claims,
 	ctx, span := trace.SpanFromContext(ctx).Tracer().Start(ctx, "business.data.user.querybyid")
 	defer span.End()
 
-	if _, err := uuid.Parse(userID); err != nil {
+	if err := validate.CheckID(userID); err != nil {
 		return Info{}, ErrInvalidID
 	}
 
 	// If you are not an admin and looking to retrieve someone other than yourself.
-	if !claims.HasRole(auth.RoleAdmin) && claims.Subject != userID {
+	if !claims.Authorized(auth.RoleAdmin) && claims.Subject != userID {
 		return Info{}, ErrForbidden
 	}
 
-	const q = `SELECT * FROM users WHERE user_id = $1`
+	data := struct {
+		UserID string `db:"user_id"`
+	}{
+		UserID: userID,
+	}
 
-	u.log.Printf("%s : %s : query : %s", traceID, "user.QueryByID",
-		database.Log(q, userID),
+	const q = `
+	SELECT
+		*
+	FROM
+		users
+	WHERE 
+		user_id = :user_id`
+
+	u.log.Printf("%s: %s: %s", traceID, "user.QueryByID",
+		database.Log(q, data),
 	)
 
 	var usr Info
-	if err := u.db.GetContext(ctx, &usr, q, userID); err != nil {
-		if err == sql.ErrNoRows {
+	if err := database.NamedQueryStruct(ctx, u.db, q, data, &usr); err != nil {
+		if err == database.ErrNotFound {
 			return Info{}, ErrNotFound
 		}
-		return Info{}, errors.Wrapf(err, "selecting user %q", userID)
+		return Info{}, errors.Wrapf(err, "selecting user %q", data.UserID)
 	}
 
 	return usr, nil
@@ -205,22 +266,39 @@ func (u User) QueryByEmail(ctx context.Context, traceID string, claims auth.Clai
 	ctx, span := trace.SpanFromContext(ctx).Tracer().Start(ctx, "business.data.user.querybyemail")
 	defer span.End()
 
-	const q = `SELECT * FROM users WHERE email = $1`
+	// Add Email Validate function in validate
+	// if err := validate.Email(email); err != nil {
+	// 	return Info{}, ErrInvalidEmail
+	// }
 
-	u.log.Printf("%s : %s : query : %s", traceID, "user.QueryByEmail",
-		database.Log(q, email),
+	data := struct {
+		Email string `db:"email"`
+	}{
+		Email: email,
+	}
+
+	const q = `
+	SELECT
+		*
+	FROM
+		users
+	WHERE
+		email = :email`
+
+	u.log.Printf("%s: %s: %s", traceID, "user.QueryByEmail",
+		database.Log(q, data),
 	)
 
 	var usr Info
-	if err := u.db.GetContext(ctx, &usr, q, email); err != nil {
-		if err == sql.ErrNoRows {
+	if err := database.NamedQueryStruct(ctx, u.db, q, data, &usr); err != nil {
+		if err == database.ErrNotFound {
 			return Info{}, ErrNotFound
 		}
 		return Info{}, errors.Wrapf(err, "selecting user %q", email)
 	}
 
 	// If you are not an admin and looking to retrieve someone other than yourself.
-	if !claims.HasRole(auth.RoleAdmin) && claims.Subject != usr.ID {
+	if !claims.Authorized(auth.RoleAdmin) && claims.Subject != usr.ID {
 		return Info{}, ErrForbidden
 	}
 
@@ -234,22 +312,30 @@ func (u User) Authenticate(ctx context.Context, traceID string, now time.Time, e
 	ctx, span := trace.SpanFromContext(ctx).Tracer().Start(ctx, "business.data.user.authenticate")
 	defer span.End()
 
-	const q = `SELECT * FROM users WHERE email = $1`
+	data := struct {
+		Email string `db:"email"`
+	}{
+		Email: email,
+	}
 
-	u.log.Printf("%s : %s : query : %s", traceID, "user.Authenticate",
-		database.Log(q, email),
+	const q = `
+	SELECT
+		*
+	FROM
+		users
+	WHERE
+		email = :email`
+
+	u.log.Printf("%s: %s: %s", traceID, "user.Authenticate",
+		database.Log(q, data),
 	)
 
 	var usr Info
-	if err := u.db.GetContext(ctx, &usr, q, email); err != nil {
-
-		// Normally we would return ErrNotFound in this scenario but we do not want
-		// to leak to an unauthenticated user which emails are in the system.
-		if err == sql.ErrNoRows {
-			return auth.Claims{}, ErrAuthenticationFailure
+	if err := database.NamedQueryStruct(ctx, u.db, q, data, &usr); err != nil {
+		if err == database.ErrNotFound {
+			return auth.Claims{}, ErrNotFound
 		}
-
-		return auth.Claims{}, errors.Wrap(err, "selecting single user")
+		return auth.Claims{}, errors.Wrapf(err, "selecting user %q", email)
 	}
 
 	// Compare the provided password with the saved hash. Use the bcrypt
@@ -264,9 +350,8 @@ func (u User) Authenticate(ctx context.Context, traceID string, now time.Time, e
 		StandardClaims: jwt.StandardClaims{
 			Issuer:    "service project",
 			Subject:   usr.ID,
-			Audience:  "students",
-			ExpiresAt: now.Add(time.Hour).Unix(),
-			IssuedAt:  now.Unix(),
+			ExpiresAt: jwt.At(now.Add(time.Hour)),
+			IssuedAt:  jwt.At(now),
 		},
 		Roles: usr.Roles,
 	}

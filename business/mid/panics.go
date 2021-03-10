@@ -8,7 +8,7 @@ import (
 
 	"github.com/ardanlabs/service/foundation/web"
 	"github.com/pkg/errors"
-	"go.opentelemetry.io/otel/api/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Panics recovers from panics and converts the panic to an error so it is
@@ -16,7 +16,7 @@ import (
 func Panics(log *log.Logger) web.Middleware {
 
 	// This is the actual middleware function to be executed.
-	m := func(after web.Handler) web.Handler {
+	m := func(handler web.Handler) web.Handler {
 
 		// Create the handler that will be attached in the middleware chain.
 		h := func(ctx context.Context, w http.ResponseWriter, r *http.Request) (err error) {
@@ -37,12 +37,12 @@ func Panics(log *log.Logger) web.Middleware {
 					err = errors.Errorf("panic: %v", r)
 
 					// Log the Go stack trace for this panic'd goroutine.
-					log.Printf("%s :\n%s", v.TraceID, debug.Stack())
+					log.Printf("%s: PANIC:\n%s", v.TraceID, debug.Stack())
 				}
 			}()
 
-			// Call the next Handler and set its return value in the err variable.
-			return after(ctx, w, r)
+			// Call the next handler and set its return value in the err variable.
+			return handler(ctx, w, r)
 		}
 
 		return h
